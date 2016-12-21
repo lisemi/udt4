@@ -38,6 +38,13 @@ written by
    Yunhong Gu, last updated 07/09/2011
 *****************************************************************************/
 
+/****************************************************************************
+API调试流程说明：
+	UDT命名空间中提供了给应用程序调用的接口，可称为UDT API或User API；User API调用CUDT API，
+这一层主要用来做错误处理，也就是捕获动作实际执行过程中抛出的异常并保存起来，然后给应用程序使用；
+CUDT API调用CUDTUnited中API的实现。
+*****************************************************************************/
+
 #ifdef WIN32
    #include <winsock2.h>
    #include <ws2tcpip.h>
@@ -180,34 +187,36 @@ CUDTUnited::~CUDTUnited()
 
 int CUDTUnited::startup()
 {
+	// 开启一个临时锁，CGuard的运行机制就是在构造函数中启动等待锁信号，在析构中释放锁信号
+	// 因此在本函数过程中会受到锁的保护，函数运行结束，CGuard对象被释放，锁也就被释放,保证了当前函数的线程安全
    CGuard gcinit(m_InitLock);
 
-   if (m_iInstanceCount++ > 0)
+   if (m_iInstanceCount++ > 0)	// 保证只被启动一次
       return 0;
 
    // Global initialization code
    #ifdef WIN32
-      WORD wVersionRequested;
-      WSADATA wsaData;
-      wVersionRequested = MAKEWORD(2, 2);
+      WORD wVersionRequested;	// Windows Sockets API提供的调用方可使用的最高版本号,低位字节（MAKEWORD第1个参数）指明主版本号，高位字节（MAKEWORD第2个参数）指出副版本(修正)号。
+      WSADATA wsaData;			// 指向WSADATA数据结构的指针，用来接收Windows Sockets实现的细节。这里没有做什么特殊处理。
+      wVersionRequested = MAKEWORD(2, 2);	// 主版本号和副版本号都为2
 
-      if (0 != WSAStartup(wVersionRequested, &wsaData))
+      if (0 != WSAStartup(wVersionRequested, &wsaData))	// 即WSA(Windows Sockets Asynchronous，Windows异步套接字)的启动命
          throw CUDTException(1, 0,  WSAGetLastError());
    #endif
 
    //init CTimer::EventLock
 
-   if (m_bGCStatus)
+   if (m_bGCStatus)		// 如果垃圾收集已经启动，那么运行到这里就可以返回了
       return true;
 
-   m_bClosing = false;
+   m_bClosing = false;	// 启动垃圾收集garbageCollect线程
    #ifndef WIN32
       pthread_mutex_init(&m_GCStopLock, NULL);
       pthread_cond_init(&m_GCStopCond, NULL);
       pthread_create(&m_GCThread, NULL, garbageCollect, this);
    #else
-      m_GCStopLock = CreateMutex(NULL, false, NULL);
-      m_GCStopCond = CreateEvent(NULL, false, false, NULL);
+      m_GCStopLock = CreateMutex(NULL, false, NULL);			// CreateMutex:创建一个有名或无名的互斥量对象,参数：指向安全属性的指针， 初始化互斥对象的所有者， 指向互斥对象名的指针
+      m_GCStopCond = CreateEvent(NULL, false, false, NULL);		// CreateEvent:用来创建或打开一个命名的或无名的事件对象
       DWORD ThreadID;
       m_GCThread = CreateThread(NULL, 0, garbageCollect, this, 0, &ThreadID);
    #endif
@@ -259,7 +268,8 @@ UDTSOCKET CUDTUnited::newSocket(int af, int type)
       throw CUDTException(5, 3, 0);
 
    CUDTSocket* ns = NULL;
-
+   
+   // To apply for space
    try
    {
       ns = new CUDTSocket;
@@ -280,10 +290,10 @@ UDTSOCKET CUDTUnited::newSocket(int af, int type)
       delete ns;
       throw CUDTException(3, 2, 0);
    }
-
-   CGuard::enterCS(m_IDLock);
+   // Initialize the data of struct CUDTSocket
+   CGuard::enterCS(m_IDLock);		// 加锁
    ns->m_SocketID = -- m_SocketID;
-   CGuard::leaveCS(m_IDLock);
+   CGuard::leaveCS(m_IDLock);		// 释放锁
 
    ns->m_Status = INIT;
    ns->m_ListenSocket = 0;
@@ -1585,6 +1595,7 @@ UDTSOCKET CUDT::socket(int af, int type, int)
    }
 }
 
+// 将一个UDT Socket与一个struct sockaddr对象描述的地址进行绑定
 int CUDT::bind(UDTSOCKET u, const sockaddr* name, int namelen)
 {
    try
@@ -1608,6 +1619,7 @@ int CUDT::bind(UDTSOCKET u, const sockaddr* name, int namelen)
    }
 }
 
+// 将一个UDT Socket直接与一个已经创建好的系统UDP socket进行绑定
 int CUDT::bind(UDTSOCKET u, UDPSOCKET udpsock)
 {
    try
@@ -1749,6 +1761,7 @@ int CUDT::getsockname(UDTSOCKET u, sockaddr* name, int* namelen)
    }
 }
 
+// 获取配置选项
 int CUDT::getsockopt(UDTSOCKET u, int, UDTOpt optname, void* optval, int* optlen)
 {
    try
@@ -1769,6 +1782,27 @@ int CUDT::getsockopt(UDTSOCKET u, int, UDTOpt optname, void* optval, int* optlen
    }
 }
 
+// 设置选项
+// 第一个参数为要设置的UDTSocket
+// 第二个参数0是会被忽略的，没有实际意义
+// 第三个参数为要设置的参数，有以下几种选项、来自enum UDTOpt：
+//     UDT_MSS 最大传输单位
+//     UDT_SNDSYN 是否阻塞发送
+//     UDT_RCVSYN 是否阻塞接收
+//     UDT_CC 自定义拥塞控制算法
+//     UDT_FC 窗口大小
+//     UDT_SNDBUF 发送队列缓冲最大值
+//     UDT_RCVBUF UDT接收缓冲大小
+//     UDT_LINGER 关闭时等待数据发送完成
+//     UDP_SNDBUF UDP发送缓冲大小
+//     UDP_RCVBUF UDP接收缓冲大小
+//     UDT_RENDEZVOUS 会合连接模式
+//     UDT_SNDTIMEO send()超时
+//     UDT_RCVTIMEO recv()超时
+//     UDT_REUSEADDR 设置UDP端口是否可以给其他UDT使用，默认值是true
+//     UDT_MAXBW 当前连接可以使用的最大带宽(bytes per second)
+// 第四个参数是参数值
+// 第五个参数为参数值长度，在底层也会被忽略，没有意义
 int CUDT::setsockopt(UDTSOCKET u, int, UDTOpt optname, const void* optval, int optlen)
 {
    try
@@ -2167,7 +2201,17 @@ int cleanup()
 {
    return CUDT::cleanup();
 }
-
+/**********************************************************
+brief:  用于创建一个新的socket
+para:
+type：    指SICK_STREAM或SOCK_DARAM
+protocol：忽略
+af：AF_INET（IPv4)或者AF_INET（IPv6）
+UDT支持IPv4和IPv6可以通过af参数选择。
+return:
+成功：返回socket描述符
+错误：返回UDT::INVALID_SOCK
+**********************************************************/
 UDTSOCKET socket(int af, int type, int protocol)
 {
    return CUDT::socket(af, type, protocol);
@@ -2187,7 +2231,14 @@ int listen(UDTSOCKET u, int backlog)
 {
    return CUDT::listen(u, backlog);
 }
-
+/*******************************************************
+brief:用于接收一个进来的连接;当一个UDT socket处于监听状态，它将接收到的连接存放在一个队列里，一个accept调用会依次从队列里
+      首先取出对头的连接，并将其移出队列。当队列里没有连接请求时，一个阻塞式的socket就会等待下一个连接，遇到错误时会有一个
+	  非阻塞式的socket立即返回。接收到的socket会继承监听socket的属性。
+return:
+	成功：返回新连接的描述符
+    错误：返回UDT::INVALID_SOCK
+*******************************************************/
 UDTSOCKET accept(UDTSOCKET u, struct sockaddr* addr, int* addrlen)
 {
    return CUDT::accept(u, addr, addrlen);

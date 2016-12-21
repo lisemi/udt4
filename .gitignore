@@ -1,0 +1,10 @@
+*.swp
+*.o
+*.a
+*.so
+udt
+test
+appserver
+appclient
+recvfile
+sendfile

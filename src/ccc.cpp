@@ -37,6 +37,19 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 written by
    Yunhong Gu, last updated 02/21/2013
 *****************************************************************************/
+/*****************************************************************************
+UDT允许用户访问两个拥塞控制参数：拥塞窗口大小和包与包之间的发送间隔。用户可以调整这两个参数来实现基于窗口的控制算法、
+基于速率的控制算法或者是一套混合的控制算法。初次之外，以下参数也是用户可见的。
+1）RTT
+2）最大报文段/包大小
+3）估计带宽
+4）最近发送的最大报文序列号
+5）包在接收端的到达速率
+
+拥塞窗口的初始值为16，包发送间隔的初始值为0
+
+written by sammy
+*****************************************************************************/
 
 
 #include "core.h"
@@ -75,11 +88,13 @@ void CCC::setACKTimer(int msINT)
    m_iACKPeriod = msINT > m_iSYNInterval ? m_iSYNInterval : msINT;
 }
 
+// 设置ACK间隔； -1，则代表不启动这种ACK确认方法
 void CCC::setACKInterval(int pktINT)
 {
    m_iACKInterval = pktINT;
 }
 
+// 在UDT中，RTO=4*RTT+RTTVar
 void CCC::setRTO(int usRTO)
 {
    m_bUserDefinedRTO = true;
@@ -167,6 +182,7 @@ m_iDecCount()
 {
 }
 
+// 当UDT socket 建立连接时调用
 void CUDTCC::init()
 {
    m_iRCInterval = m_iSYNInterval;
@@ -186,6 +202,19 @@ void CUDTCC::init()
    m_dPktSndPeriod = 1;
 }
 
+/******************************************************************************************
+收到ACK报文时：
+1）如果当前在慢启动状态，拥塞窗口大小=包到达速率（注：接收端统计后，通过ACK捎带给发送端）*（RTT+SYN）。慢启动结束。停止。
+2）如果不是在满启动状态，拥塞窗口大小（CWND）=A*（RTT+SYN）+16.
+3）在下一个SYN period，需要增加发送的包inc为：
+if （B <=C）
+inc = min_inc;
+else
+inc = max（10^ceil（log10（10（（B-C）*PS*8）））*Beta/PS，min_inc）
+其中，B是估计的链路容量，C是当前的发送速率，它们的单位均为packets/s。Beta是一个常量0.0000015，min_inc是一个最小增长值，
+0.01-i.e，我们每秒钟至少增加一个包。（如何理解0.01代表每秒至少增加一个包？）
+4）发送间隔更新为：SND=（SND*SYN）/（SND*inc+SYN）。以下四个参数用于速率减小的时候，它们的初始值为AvgNAKNum（1），NAKCount（1），DecCount（1），LastDecSeq（和初始的序列号一样为-1）
+******************************************************************************************/
 void CUDTCC::onACK(int32_t ack)
 {
    int64_t B = 0;
@@ -200,24 +229,25 @@ void CUDTCC::onACK(int32_t ack)
    if (currtime - m_LastRCTime < (uint64_t)m_iRCInterval)
       return;
 
-   m_LastRCTime = currtime;
+   m_LastRCTime = currtime;		//更新速率增长的时刻  
 
-   if (m_bSlowStart)
+   if (m_bSlowStart)			//如果是在慢启动阶段 
    {
-      m_dCWndSize += CSeqNo::seqlen(m_iLastAck, ack);
+      m_dCWndSize += CSeqNo::seqlen(m_iLastAck, ack);	//增加发送窗口
       m_iLastAck = ack;
 
-      if (m_dCWndSize > m_dMaxCWndSize)
+      if (m_dCWndSize > m_dMaxCWndSize)					//如果大于最大发送窗口 
       {
-         m_bSlowStart = false;
-         if (m_iRcvRate > 0)
-            m_dPktSndPeriod = 1000000.0 / m_iRcvRate;
+         m_bSlowStart = false;							//退出慢启动阶段  
+         if (m_iRcvRate > 0)							//这个是ACK反馈回来的接收速率信息，赋值为m_iRcvRate	
+            m_dPktSndPeriod = 1000000.0 / m_iRcvRate;	//m_dPktSndPeriod是包的发送间隔us
          else
             m_dPktSndPeriod = (m_iRTT + m_iRCInterval) / m_dCWndSize;
       }
    }
-   else
+   else   //如果不在慢启动阶段 
       m_dCWndSize = m_iRcvRate / 1000000.0 * (m_iRTT + m_iRCInterval) + 16;
+	  //由于m_iRcvRate单位是packet/s，而m_iRTT等是us。所以要对m_iRcvRate进行单位换算，发送窗口是通过接收速率*（RTT+RCInterval）+16来控制的
 
    // During Slow Start, no rate increase
    if (m_bSlowStart)
@@ -225,12 +255,12 @@ void CUDTCC::onACK(int32_t ack)
 
    if (m_bLoss)
    {
-      m_bLoss = false;
+      m_bLoss = false;	//收到ACK代表没有丢失，改变状态
       return;
    }
 
-   B = (int64_t)(m_iBandwidth - 1000000.0 / m_dPktSndPeriod);
-   if ((m_dPktSndPeriod > m_dLastDecPeriod) && ((m_iBandwidth / 9) < B))
+   B = (int64_t)(m_iBandwidth - 1000000.0 / m_dPktSndPeriod);				//理论上是网络中空闲的带宽  
+   if ((m_dPktSndPeriod > m_dLastDecPeriod) && ((m_iBandwidth / 9) < B))	//第二个表达式有什么实际意义，没想明白 
       B = m_iBandwidth / 9;
    if (B <= 0)
       inc = min_inc;
@@ -246,15 +276,33 @@ void CUDTCC::onACK(int32_t ack)
    }
 
    m_dPktSndPeriod = (m_dPktSndPeriod * m_iRCInterval) / (m_dPktSndPeriod * inc + m_iRCInterval);
+   /*分析下上面那个公式*/
+   /*
+   m_dPktSndPeriod = (m_dPktSndPeriod)*(m_iRCInterval/(m_dPktSndPeriod*inc + m_iRCInterval))),
+   其中(m_iRCInterval/(m_dPktSndPeriod*inc + m_iRCInterval))<1,inc越大这个
+   式子的值就越小，从而得到的m_dPktSndPeriod就越小，发送速率就越大，
+   至于为什么要采取这样的计算方式就不知道了
+   */
 }
 
+/**************************************************************************
+收到NAK包时：
+1）如果在慢启动阶段，结束慢启动。如果inter-packet interval=1/recvrate,则停止（注：代码中则调用return）。否则，根据当前的窗口大小（cwnd/rtt+SYN）
+   设置发送速率（也就是发包间隔inter-packet interval），然后跳转到step2）继续减小发送速率；
+2）如果这个NAK开启了一个新的拥塞时段，增加包的发送间隔inter-packet interval（snd）snd=snd*1.125；更新 AvgNAKNum，将NAKCount重置为1，
+   计算DecRandom，从1和AvgNAKNum中产生随机数（平均分布）赋值给DecRandom。更新LastDecSeq，停止。
+3）如果DecCount<=5并且NAKCount==DecCount*DecRandom：
+a.更新SND时间：SND=SND*1.125；
+b.将DecCount加1；
+c.记录当前发送的最大序列号（LastDecSeq）
+**************************************************************************/
 void CUDTCC::onLoss(const int32_t* losslist, int)
 {
    //Slow Start stopped, if it hasn't yet
    if (m_bSlowStart)
    {
       m_bSlowStart = false;
-      if (m_iRcvRate > 0)
+      if (m_iRcvRate > 0)	//单位是每秒钟多少个包packets/s,在处理ACK报文的时候设置，根据接收段的接收速度来设置发送端的m_iRcvRate，从而控制发送速度。
       {
          // Set the sending rate to the receiving rate.
          m_dPktSndPeriod = 1000000.0 / m_iRcvRate;
@@ -293,6 +341,7 @@ void CUDTCC::onLoss(const int32_t* losslist, int)
    }
 }
 
+// 当定时器超时时调用
 void CUDTCC::onTimeout()
 {
    if (m_bSlowStart)

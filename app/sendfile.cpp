@@ -30,24 +30,27 @@ int main(int argc, char* argv[])
    // use this function to initialize the UDT library
    UDT::startup();
 
-   addrinfo hints;
-   addrinfo* res;
+   addrinfo hints;	// 地址信息提示
+   addrinfo* res;	// 实际使用的地址信息指针
 
    memset(&hints, 0, sizeof(struct addrinfo));
-   hints.ai_flags = AI_PASSIVE;
+   hints.ai_flags = AI_PASSIVE;		// 表示调用者将在bind()函数调用中使用返回的地址结构。当此标志不置位时，表示将在connect()函数调用中使用
+									// 当节点名位NULL，且此标志置位，则返回的地址将是通配地址。如果节点名NULL，且此标志不置位，则返回的地址将是回环地址。
    hints.ai_family = AF_INET;
-   hints.ai_socktype = SOCK_STREAM;
+   hints.ai_socktype = SOCK_STREAM;	// 注：此处的SOCK_STREAM并不是表示UDT将会使用TCP类型的Socket，在底层将会转化为UDT_STREAM
+									// 并且在UDT中仅支持SOCK_STREAM和SOCK_DGRAM，分别对应UDT_STREAM和UDT_DGRAM
 
    string service("9000");
    if (2 == argc)
       service = argv[1];
 
+   // 根据地址信息提示分配实际可用的地址信息
    if (0 != getaddrinfo(NULL, service.c_str(), &hints, &res))
    {
       cout << "illegal port number or port is busy.\n" << endl;
       return 0;
    }
-
+   // 此处实际上最终调用了CUDTUnited的newSocket，第一个参数会被直接设置到CUDT的m_iIPversion，第二个参数会被映射为UDT的连接类型，第三个参数没有实际意义
    UDTSOCKET serv = UDT::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 
    // Windows UDP issue
@@ -81,7 +84,7 @@ int main(int argc, char* argv[])
          cout << "accept: " << UDT::getlasterror().getErrorMessage() << endl;
          return 0;
       }
-
+	  // 通过getnameinfo()将地址信息转换为节点地址、端口信息
       char clienthost[NI_MAXHOST];
       char clientservice[NI_MAXSERV];
       getnameinfo((sockaddr *)&clientaddr, addrlen, clienthost, sizeof(clienthost), clientservice, sizeof(clientservice), NI_NUMERICHOST|NI_NUMERICSERV);
@@ -116,13 +119,13 @@ DWORD WINAPI sendfile(LPVOID usocket)
    // aquiring file name information from client
    char file[1024];
    int len;
-
+   // 接收一个数据包，内容为一个int值，长度为int的长度，数值保存在len中
    if (UDT::ERROR == UDT::recv(fhandle, (char*)&len, sizeof(int), 0))
    {
       cout << "recv: " << UDT::getlasterror().getErrorMessage() << endl;
       return 0;
    }
-
+   // 接收文件名，通过上面获得的长度来判断信息的大小
    if (UDT::ERROR == UDT::recv(fhandle, file, len, 0))
    {
       cout << "recv: " << UDT::getlasterror().getErrorMessage() << endl;
@@ -133,9 +136,9 @@ DWORD WINAPI sendfile(LPVOID usocket)
    // open the file
    fstream ifs(file, ios::in | ios::binary);
 
-   ifs.seekg(0, ios::end);
-   int64_t size = ifs.tellg();
-   ifs.seekg(0, ios::beg);
+   ifs.seekg(0, ios::end);		// 让文件指针定位到文件末尾
+   int64_t size = ifs.tellg();	// 获得文件大小
+   ifs.seekg(0, ios::beg);		// 让文件指针定位到文件开头
 
    // send file size information
    if (UDT::ERROR == UDT::send(fhandle, (char*)&size, sizeof(int64_t), 0))
